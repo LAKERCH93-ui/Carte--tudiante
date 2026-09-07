@@ -1,0 +1,164 @@
+// ==========================================
+// UTILITAIRES — SHEET + DRIVE
+// ==========================================
+
+// ---------- SHEET ----------
+
+function getSheet() {
+  return SpreadsheetApp.openById(CONFIG.SHEET_ID).getSheetByName(CONFIG.SHEET_NAME);
+}
+
+/**
+ * Retourne l'index de colonne (1-indexé, pour getRange) d'un nom d'en-tête.
+ * Lève une erreur explicite si l'en-tête n'existe pas au lieu d'écrire dans la mauvaise colonne.
+ */
+function getColIndex(headerName) {
+  var idx = HEADERS.indexOf(headerName);
+  if (idx === -1) {
+    throw new Error("En-tête introuvable dans HEADERS : " + headerName);
+  }
+  return idx + 1;
+}
+
+/**
+ * Valide que les en-têtes réels de la feuille correspondent à HEADERS avant toute écriture.
+ * Si ça ne correspond pas, on arrête tout plutôt que d'écrire une ligne corrompue.
+ */
+function validateHeaders_() {
+  var sheet = getSheet();
+  var actualHeaders = sheet.getRange(1, 1, 1, HEADERS.length).getValues()[0];
+  for (var i = 0; i < HEADERS.length; i++) {
+    if (actualHeaders[i] !== HEADERS[i]) {
+      throw new Error(
+        "Décalage d'en-tête détecté colonne " + (i + 1) +
+        " : attendu '" + HEADERS[i] + "', trouvé '" + actualHeaders[i] + "'. Écriture annulée."
+      );
+    }
+  }
+}
+
+/**
+ * Construit un objet {nomColonne: valeur} pour une ligne donnée (1-indexée).
+ */
+function getRowAsObject(rowNumber) {
+  var sheet = getSheet();
+  var values = sheet.getRange(rowNumber, 1, 1, HEADERS.length).getValues()[0];
+  var obj = {};
+  for (var i = 0; i < HEADERS.length; i++) {
+    obj[HEADERS[i]] = values[i];
+  }
+  return obj;
+}
+
+/**
+ * Écrit une ou plusieurs valeurs {nomColonne: valeur} sur une ligne donnée.
+ * Valide les en-têtes avant d'écrire quoi que ce soit (tout ou rien).
+ */
+function setRowValues(rowNumber, valuesByHeader) {
+  validateHeaders_();
+  var sheet = getSheet();
+  for (var headerName in valuesByHeader) {
+    var col = getColIndex(headerName);
+    sheet.getRange(rowNumber, col).setValue(valuesByHeader[headerName]);
+  }
+}
+
+/**
+ * Ajoute une nouvelle ligne à partir d'un objet {nomColonne: valeur}.
+ * Les colonnes non fournies sont laissées vides. Valide les en-têtes d'abord.
+ */
+function appendRowFromObject(valuesByHeader) {
+  validateHeaders_();
+  var sheet = getSheet();
+  var row = [];
+  for (var i = 0; i < HEADERS.length; i++) {
+    var h = HEADERS[i];
+    row.push(valuesByHeader.hasOwnProperty(h) ? valuesByHeader[h] : "");
+  }
+  sheet.appendRow(row);
+  return sheet.getLastRow();
+}
+
+/**
+ * Cherche une ligne par matricule. Retourne { rowNumber, data } ou null si absent.
+ */
+function findRowByMatricule(matricule) {
+  var sheet = getSheet();
+  var colMatricule = getColIndex("Matricule");
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+
+  var values = sheet.getRange(2, colMatricule, lastRow - 1, 1).getValues();
+  for (var i = 0; i < values.length; i++) {
+    var val = values[i][0];
+    if (val && val.toString().trim().toLowerCase() === matricule.toString().trim().toLowerCase()) {
+      var rowNumber = i + 2;
+      return { rowNumber: rowNumber, data: getRowAsObject(rowNumber) };
+    }
+  }
+  return null;
+}
+
+/**
+ * Cherche une ligne par ID unique (UUID). Retourne { rowNumber, data } ou null.
+ */
+function findRowById(id) {
+  var sheet = getSheet();
+  var colId = getColIndex("ID");
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+
+  var values = sheet.getRange(2, colId, lastRow - 1, 1).getValues();
+  for (var i = values.length - 1; i >= 0; i--) {
+    var val = values[i][0];
+    if (val && val.toString() === id.toString()) {
+      var rowNumber = i + 2;
+      return { rowNumber: rowNumber, data: getRowAsObject(rowNumber) };
+    }
+  }
+  return null;
+}
+
+// ---------- DRIVE ----------
+
+/**
+ * Sauvegarde un fichier envoyé en base64 (data URL) dans un dossier Drive.
+ * L'extension est déduite du mimeType réel plutôt que d'un défaut fixe.
+ */
+function saveFile(fileData, fileName, folder) {
+  if (!fileData || !fileData.data) return "";
+
+  var parts = fileData.data.split(',');
+  var mimeMatch = parts[0].match(/:(.*?);/);
+  var mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+  var base64Data = parts[1];
+
+  var ext = extensionForMimeType_(mimeType);
+
+  var blob = Utilities.newBlob(Utilities.base64Decode(base64Data), mimeType, fileName + ext);
+  var file = folder.createFile(blob);
+
+  return file.getUrl();
+}
+
+function extensionForMimeType_(mimeType) {
+  var map = {
+    "application/pdf": ".pdf",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+    "image/webp": ".webp"
+  };
+  return map[mimeType] || "";
+}
+
+function extractDriveId(url) {
+  var match = url.match(/[-\w]{25,}/);
+  if (match) return match[0];
+  throw new Error("Lien Drive invalide.");
+}
+
+
+

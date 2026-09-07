@@ -1,0 +1,84 @@
+// ==========================================
+// CONFIGURATION GLOBALE
+// ==========================================
+// A REMPLIR : les IDs ci-dessous sont des placeholders.
+// TEMPLATE_SLIDE_ID pour chaque école = l'ID du fichier Google Slides
+// contenant le design de la carte (converti depuis le PPTX envoyé).
+
+const CONFIG = {
+  SHEET_ID: "12zeVZy1anxYQNJQyt3eYv6Ugxx_uI1LZlwK_ODoiGm8",
+
+  MAIN_FOLDER_ID: "1jVmsjYeoX1GtWb5RKbORz_hA2Otupem9",
+  DOCS_FOLDER_ID: "1L9cbfM0Qn5a6BeFD-ae1evU4qAnDBAtT",
+  CARDS_FOLDER_ID: "19zAfQ-lzmwNLkDom2XTISesiAWzgLQ_V",
+
+  WEB_APP_URL: "AKfycbxgLB4vwTs-sd2sXDxbxe9GwrbZICOx-XegSzKKKtARkLPQ758Fc8216z4qk_LsYPFs",
+  SHEET_NAME: "ETUDIANTS_CARTES"
+};
+
+// Mapping École -> template Slide + couleur d'accent (pour la page de vérification)
+// + liste des formations proposées pour cette école (menu déroulant dépendant côté formulaire)
+const ECOLES = {
+  "ESART Business School": {
+    templateSlideId: "A_REMPLIR_ID_SLIDE_ESART",
+    couleur: "#E8622C",
+    formations: ["Bachelor Management", "MBA International Business", "Executive MBA"]
+  },
+  "ESEA": {
+    templateSlideId: "A_REMPLIR_ID_SLIDE_ESEA",
+    couleur: "#4A9B3E",
+    formations: ["Bachelor Énergies Alternatives", "Master Développement Durable"]
+  },
+  "ESMOSS": {
+    templateSlideId: "A_REMPLIR_ID_SLIDE_ESMOSS",
+    couleur: "#1F5FA8",
+    formations: ["Bachelor Management du Sport", "Master Management du Sport"]
+  },
+  "ESMAS": {
+    templateSlideId: "A_REMPLIR_ID_SLIDE_ESMAS",
+    couleur: "#0B2E5C",
+    formations: ["Bachelor Assurance", "Master Assurance et Gestion des Risques"]
+  },
+  "Marne La Vallée Business School": {
+    templateSlideId: "A_REMPLIR_ID_SLIDE_MLV_BS",
+    couleur: "#111111",
+    formations: ["Bachelor Business", "MBA"]
+  },
+  "Marne La Vallée BTS": {
+    templateSlideId: "A_REMPLIR_ID_SLIDE_MLV_BTS",
+    couleur: "#111111",
+    formations: ["BTS Management Commercial Opérationnel", "BTS Comptabilité et Gestion", "BTS Support à l'Action Managériale"]
+  },
+  "ESJM": {
+    templateSlideId: "A_REMPLIR_ID_SLIDE_ESJM",
+    couleur: "#B01E2E",
+    formations: ["Bachelor Droit", "Master Droit des Affaires"]
+  }
+};
+
+// En-têtes de la feuille ETUDIANTS_CARTES, dans l'ordre.
+// Toute lecture/écriture doit passer par SheetUtils (getColIndex), jamais par un index en dur.
+const HEADERS = [
+  "ID",
+  "Date_inscription",
+  "Ecole",
+  "Nom",
+  "Prenom",
+  "Matricule",
+  "Email",
+  "Telephone",
+  "Date_naissance",
+  "Formation",
+  "Annee",
+  "Lien_dossier_Drive",
+  "Lien_photo",
+  "Lien_preuve_inscription",
+  "Lien_justificatif_paiement",
+  "Lien_carte_PDF",
+  "Statut_dossier",
+  "Date_validation",
+  "Email_envoye",
+  "Statut_carte",
+  "Date_dernier_changement_statut",
+  "Source_changement_statut"
+];

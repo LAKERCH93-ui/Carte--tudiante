@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demande de carte étudiante — Campus de Noisiel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;800&display=swap" rel="stylesheet">
+    <style>body { font-family: 'Montserrat', sans-serif; }</style>
+</head>
+<body class="bg-gray-100 min-h-screen flex flex-col items-center py-10 px-4">
+
+    <div class="w-full max-w-lg">
+        <div class="mb-6 text-center">
+            <h1 class="text-2xl font-black text-gray-800">Demande de carte étudiante</h1>
+            <p class="text-sm text-gray-500">Campus de Noisiel</p>
+        </div>
+
+        <div id="formCard" class="bg-white rounded-3xl shadow-xl p-6 space-y-4">
+
+            <div>
+                <label class="block text-sm font-semibold text-gray-700 mb-1">École *</label>
+                <select id="ecole" class="w-full border border-gray-300 rounded-xl p-3"></select>
+            </div>
+
+            <div>
+                <label class="block text-sm font-semibold text-gray-700 mb-1">Formation *</label>
+                <select id="formation" class="w-full border border-gray-300 rounded-xl p-3"></select>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Nom *</label>
+                    <input id="nom" type="text" class="w-full border border-gray-300 rounded-xl p-3" />
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Prénom *</label>
+                    <input id="prenom" type="text" class="w-full border border-gray-300 rounded-xl p-3" />
+                </div>
+            </div>
+
+            <div>
+                <label class="block text-sm font-semibold text-gray-700 mb-1">Matricule *</label>
+                <input id="matricule" type="text" class="w-full border border-gray-300 rounded-xl p-3" />
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Email *</label>
+                    <input id="email" type="email" class="w-full border border-gray-300 rounded-xl p-3" />
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Téléphone</label>
+                    <input id="telephone" type="tel" class="w-full border border-gray-300 rounded-xl p-3" />
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Date de naissance *</label>
+                    <input id="dateNaissance" type="date" class="w-full border border-gray-300 rounded-xl p-3" />
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Année scolaire *</label>
+                    <input id="annee" type="text" placeholder="2026-2027" class="w-full border border-gray-300 rounded-xl p-3" />
+                </div>
+            </div>
+
+            <hr class="my-2">
+
+            <div>
+                <label class="block text-sm font-semibold text-gray-700 mb-1">Photo d'identité *</label>
+                <input id="photo" type="file" accept="image/*" class="w-full" />
+            </div>
+
+            <div>
+                <label class="block text-sm font-semibold text-gray-700 mb-1">Preuve d'inscription *</label>
+                <input id="preuve" type="file" accept="image/*,application/pdf" class="w-full" />
+            </div>
+
+            <div>
+                <label class="block text-sm font-semibold text-gray-700 mb-1">Justificatif de paiement de scolarité (attestation de scolarité) *</label>
+                <input id="justificatif" type="file" accept="image/*,application/pdf" class="w-full" />
+            </div>
+
+            <button id="submitBtn" onclick="submitForm()" class="w-full bg-gray-900 text-white font-bold rounded-xl p-3 mt-2">
+                Envoyer ma demande
+            </button>
+
+            <p id="statusMsg" class="text-sm text-center mt-2"></p>
+        </div>
+    </div>
+
+    <script>
+        // Données injectées côté serveur (tag non échappé requis pour du JSON dynamique)
+        const ECOLES_DATA = <?!= JSON.stringify(ecolesData) ?>;
+        const WEB_APP_URL = <?!= JSON.stringify(webAppUrl) ?>;
+
+        const ecoleSelect = document.getElementById('ecole');
+        const formationSelect = document.getElementById('formation');
+
+        function populateEcoles() {
+            ecoleSelect.innerHTML = '<option value="">-- Choisir --</option>';
+            Object.keys(ECOLES_DATA).forEach(function(nomEcole) {
+                const opt = document.createElement('option');
+                opt.value = nomEcole;
+                opt.textContent = nomEcole;
+                ecoleSelect.appendChild(opt);
+            });
+        }
+
+        function populateFormations() {
+            const ecole = ecoleSelect.value;
+            formationSelect.innerHTML = '<option value="">-- Choisir --</option>';
+            if (!ecole || !ECOLES_DATA[ecole]) return;
+            ECOLES_DATA[ecole].formations.forEach(function(f) {
+                const opt = document.createElement('option');
+                opt.value = f;
+                opt.textContent = f;
+                formationSelect.appendChild(opt);
+            });
+        }
+
+        ecoleSelect.addEventListener('change', populateFormations);
+        populateEcoles();
+
+        function readFileAsDataUrl(fileInput) {
+            return new Promise(function(resolve, reject) {
+                const file = fileInput.files[0];
+                if (!file) { resolve(null); return; }
+                const reader = new FileReader();
+                reader.onload = function() { resolve({ data: reader.result }); };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function submitForm() {
+            const statusMsg = document.getElementById('statusMsg');
+            const submitBtn = document.getElementById('submitBtn');
+
+            const requiredFields = ['ecole', 'formation', 'nom', 'prenom', 'matricule', 'email', 'dateNaissance', 'annee'];
+            for (const id of requiredFields) {
+                if (!document.getElementById(id).value) {
+                    statusMsg.textContent = "Veuillez remplir tous les champs obligatoires.";
+                    statusMsg.className = "text-sm text-center mt-2 text-red-600 font-semibold";
+                    return;
+                }
+            }
+
+            const photoFile = document.getElementById('photo').files[0];
+            const preuveFile = document.getElementById('preuve').files[0];
+            const justificatifFile = document.getElementById('justificatif').files[0];
+
+            if (!photoFile || !preuveFile || !justificatifFile) {
+                statusMsg.textContent = "Veuillez joindre la photo, la preuve d'inscription et le justificatif de paiement.";
+                statusMsg.className = "text-sm text-center mt-2 text-red-600 font-semibold";
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = "Envoi en cours...";
+
+            try {
+                const [photo, preuve, justificatif] = await Promise.all([
+                    readFileAsDataUrl(document.getElementById('photo')),
+                    readFileAsDataUrl(document.getElementById('preuve')),
+                    readFileAsDataUrl(document.getElementById('justificatif'))
+                ]);
+
+                const payload = {
+                    ecole: ecoleSelect.value,
+                    formation: formationSelect.value,
+                    nom: document.getElementById('nom').value,
+                    prenom: document.getElementById('prenom').value,
+                    matricule: document.getElementById('matricule').value,
+                    email: document.getElementById('email').value,
+                    telephone: document.getElementById('telephone').value,
+                    dateNaissance: document.getElementById('dateNaissance').value,
+                    annee: document.getElementById('annee').value,
+                    photo: photo,
+                    preuve: preuve,
+                    justificatif: justificatif
+                };
+
+                // Content-Type text/plain volontaire : évite le preflight CORS sur les webapps Apps Script
+                const response = await fetch(WEB_APP_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+
+                if (result.status === 'success') {
+                    document.getElementById('formCard').innerHTML =
+                        '<div class="text-center py-6"><h2 class="text-xl font-bold text-green-600 mb-2">Demande envoyée !</h2><p class="text-gray-600">Votre dossier est en cours de vérification. Vous recevrez votre carte par email une fois validé.</p></div>';
+                } else {
+                    statusMsg.textContent = "Erreur : " + result.message;
+                    statusMsg.className = "text-sm text-center mt-2 text-red-600 font-semibold";
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = "Envoyer ma demande";
+                }
+            } catch (err) {
+                statusMsg.textContent = "Erreur d'envoi : " + err.message;
+                statusMsg.className = "text-sm text-center mt-2 text-red-600 font-semibold";
+                submitBtn.disabled = false;
+                submitBtn.textContent = "Envoyer ma demande";
+            }
+        }
+    </script>
+</body>
+</html>

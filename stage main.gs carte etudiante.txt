@@ -1,0 +1,658 @@
+// ==========================================
+// MAIN — INSTALLATION, MENU ADMIN, GÉNÉRATION CARTE, EMAILS, WEBAPP
+// ==========================================
+
+// ---------- INSTALLATION (à exécuter une seule fois) ----------
+
+function installSystem() {
+  // Projet standalone (non lié à une Sheet) : on crée la Sheet nous-mêmes.
+  var ss = SpreadsheetApp.create("BDD Cartes Étudiantes - Campus Noisiel");
+  var sheet = ss.getSheets()[0];
+  sheet.setName(CONFIG.SHEET_NAME);
+
+  sheet.clear();
+  sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+  sheet.getRange(1, 1, 1, HEADERS.length).setFontWeight("bold").setBackground("#d9ead3");
+  sheet.setFrozenRows(1);
+
+  var root = DriveApp.getRootFolder();
+  var mainFolder = root.createFolder("GESTION_CARTES_ETUDIANTS_NOISIEL");
+  var docsFolder = mainFolder.createFolder("DOCUMENTS_ETUDIANTS");
+  var cardsFolder = mainFolder.createFolder("CARTES_GENEREES");
+
+  Logger.log("--- INSTALLATION TERMINÉE ---");
+  Logger.log("Sheet créée ici : " + ss.getUrl());
+  Logger.log("SHEET_ID à copier dans Config.gs : " + ss.getId());
+  Logger.log("MAIN_FOLDER_ID : " + mainFolder.getId());
+  Logger.log("DOCS_FOLDER_ID : " + docsFolder.getId());
+  Logger.log("CARDS_FOLDER_ID : " + cardsFolder.getId());
+  Logger.log("");
+  Logger.log("Étapes suivantes :");
+  Logger.log("1. Copier ces 4 IDs dans CONFIG (Config.gs)");
+  Logger.log("2. Créer les 7 templates Google Slides (un par école), en gardant les tags {{NOM}}, {{PRENOM}}, {{MATRICULE}}, {{DATE_NAISSANCE}}, {{ANNEE}}, {{FORMATION}}, {{PHOTO}}, {{QR}}");
+  Logger.log("3. Copier l'ID de chaque Slide dans ECOLES (Config.gs), champ templateSlideId");
+  Logger.log("4. Déployer le projet en Web App, copier l'URL /exec dans CONFIG.WEB_APP_URL, puis redéployer une 2e fois avec cette URL renseignée");
+  Logger.log("5. Exécuter setupTriggers() une seule fois pour activer le menu admin et le suivi automatique des statuts");
+}
+
+/**
+ * À exécuter une seule fois après installSystem() (et après avoir collé le SHEET_ID dans Config.gs).
+ * Installe :
+ * - le déclencheur onEdit (horodatage auto quand Statut_carte est modifié à la main)
+ * - le déclencheur onOpen (fait apparaître le menu ⚙️ Administration Cartes)
+ * Nécessaire car le script est standalone (non lié à la Sheet) : les triggers simples
+ * onOpen()/onEdit() ne se déclenchent pas automatiquement dans ce cas.
+ */
+function setupTriggers() {
+  var ss = SpreadsheetApp.openById(CONFIG.SHEET_ID);
+
+  ScriptApp.newTrigger('onStatutCarteEdit')
+    .forSpreadsheet(ss)
+    .onEdit()
+    .create();
+
+  ScriptApp.newTrigger('onOpen')
+    .forSpreadsheet(ss)
+    .onOpen()
+    .create();
+
+  Logger.log("Déclencheurs onEdit et onOpen installés. Rouvre la Sheet pour voir le menu ⚙️ Administration Cartes.");
+}
+
+/**
+ * Déclenché à chaque édition de la Sheet. Ne fait quelque chose que si la colonne
+ * modifiée est Statut_carte : normalise la valeur (ACTIF/INACTIF) et horodate le changement.
+ */
+function onStatutCarteEdit(e) {
+  try {
+    var sheet = e.range.getSheet();
+    if (sheet.getName() !== CONFIG.SHEET_NAME) return;
+    if (e.range.getRow() === 1) return; // ligne d'en-tête
+
+    var colStatutCarte = getColIndex("Statut_carte");
+    if (e.range.getColumn() !== colStatutCarte) return;
+
+    var rawValue = e.value ? e.value.toString().trim().toUpperCase() : "";
+    var normalized = (rawValue === "ACTIF") ? "ACTIF" : "INACTIF";
+
+    e.range.setValue(normalized);
+    setRowValues(e.range.getRow(), {
+      "Date_dernier_changement_statut": new Date(),
+      "Source_changement_statut": "MANUEL (admin Sheet)"
+    });
+  } catch (err) {
+    Logger.log("Erreur onStatutCarteEdit: " + err.message);
+  }
+}
+
+// ==========================================
+// MENU ADMIN
+// ==========================================
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('⚙️ Administration Cartes')
+    .addItem('✅ Valider et générer les cartes (lignes sélectionnées)', 'processValidation')
+    .addItem('❌ Refuser les lignes sélectionnées (email)', 'processRejection')
+    .addSeparator()
+    .addItem('🔓 Activer les lignes sélectionnées', 'activateSelectedRows')
+    .addItem('🔒 Désactiver les lignes sélectionnées', 'deactivateSelectedRows')
+    .addSeparator()
+    .addItem('🔄 Régénérer la carte (lignes sélectionnées)', 'regenerateSelectedCards')
+    .addToUi();
+}
+
+/**
+ * Valide les dossiers sélectionnés : génère la carte PDF (template de la bonne école),
+ * l'envoie par email, met à jour le statut du dossier et active la carte par défaut.
+ */
+function processValidation() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var ui = SpreadsheetApp.getUi();
+
+  if (sheet.getName() !== CONFIG.SHEET_NAME) {
+    ui.alert("Sélectionnez d'abord des lignes dans l'onglet " + CONFIG.SHEET_NAME + ".");
+    return;
+  }
+
+  var range = sheet.getActiveRange();
+  var startRow = range.getRow();
+  var numRows = range.getNumRows();
+
+  if (startRow < 2) {
+    ui.alert("Veuillez sélectionner des lignes d'étudiants (à partir de la ligne 2).");
+    return;
+  }
+
+  var response = ui.alert(
+    'Validation par lot',
+    'Générer et envoyer les cartes pour les ' + numRows + ' étudiant(s) sélectionné(s) ?',
+    ui.ButtonSet.YES_NO
+  );
+  if (response !== ui.Button.YES) return;
+
+  var countSuccess = 0, countSkipped = 0, countError = 0;
+
+  for (var i = 0; i < numRows; i++) {
+    var currentRow = startRow + i;
+    var row = getRowAsObject(currentRow);
+
+    if (!row.ID) continue; // ligne vide
+
+    if (row.Statut_dossier === "CARTE ENVOYÉE") {
+      countSkipped++;
+      continue;
+    }
+
+    if (!row.Lien_photo || !row.Lien_preuve_inscription || !row.Lien_justificatif_paiement) {
+      setRowValues(currentRow, { "Statut_dossier": "ERREUR : PIÈCE MANQUANTE" });
+      countError++;
+      continue;
+    }
+
+    if (!ECOLES.hasOwnProperty(row.Ecole)) {
+      setRowValues(currentRow, { "Statut_dossier": "ERREUR : ÉCOLE INCONNUE" });
+      countError++;
+      continue;
+    }
+
+    try {
+      setRowValues(currentRow, { "Statut_dossier": "GÉNÉRATION EN COURS..." });
+
+      var pdfFile = generateStudentCard(row);
+      sendCardEmail(row, pdfFile);
+
+      setRowValues(currentRow, {
+        "Lien_carte_PDF": pdfFile.getUrl(),
+        "Statut_dossier": "CARTE ENVOYÉE",
+        "Date_validation": new Date(),
+        "Email_envoye": "OUI"
+      });
+
+      // Active la carte par défaut seulement si le statut n'a jamais été défini
+      if (!row.Statut_carte || row.Statut_carte.toString().trim() === "") {
+        setRowValues(currentRow, {
+          "Statut_carte": "ACTIF",
+          "Date_dernier_changement_statut": new Date(),
+          "Source_changement_statut": "AUTO (validation dossier)"
+        });
+      }
+
+      countSuccess++;
+    } catch (e) {
+      setRowValues(currentRow, { "Statut_dossier": "ERREUR: " + e.message });
+      countError++;
+    }
+  }
+
+  ui.alert("✅ Terminé", countSuccess + " carte(s) générée(s) et envoyée(s).\n" + countSkipped + " déjà traitée(s).\n" + countError + " erreur(s).", ui.ButtonSet.OK);
+}
+
+/**
+ * Refuse les dossiers sélectionnés : envoie un email de non-conformité,
+ * marque le dossier REFUSÉ et désactive la carte.
+ */
+function processRejection() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var ui = SpreadsheetApp.getUi();
+
+  if (sheet.getName() !== CONFIG.SHEET_NAME) {
+    ui.alert("Sélectionnez d'abord des lignes dans l'onglet " + CONFIG.SHEET_NAME + ".");
+    return;
+  }
+
+  var range = sheet.getActiveRange();
+  var startRow = range.getRow();
+  var numRows = range.getNumRows();
+
+  if (startRow < 2) {
+    ui.alert("Veuillez sélectionner des lignes d'étudiants (à partir de la ligne 2).");
+    return;
+  }
+
+  var response = ui.alert(
+    'Refus par lot',
+    'Envoyer un email de REFUS (documents non conformes) aux ' + numRows + ' étudiant(s) sélectionné(s) ?',
+    ui.ButtonSet.YES_NO
+  );
+  if (response !== ui.Button.YES) return;
+
+  var countSuccess = 0, countSkipped = 0;
+
+  for (var i = 0; i < numRows; i++) {
+    var currentRow = startRow + i;
+    var row = getRowAsObject(currentRow);
+
+    if (!row.ID) continue;
+
+    if (row.Statut_dossier === "CARTE ENVOYÉE" || row.Statut_dossier === "REFUSÉ (NON CONFORME)") {
+      countSkipped++;
+      continue;
+    }
+
+    sendRejectionEmail(row);
+
+    setRowValues(currentRow, {
+      "Statut_dossier": "REFUSÉ (NON CONFORME)",
+      "Date_validation": new Date(),
+      "Email_envoye": "OUI",
+      "Statut_carte": "INACTIF",
+      "Date_dernier_changement_statut": new Date(),
+      "Source_changement_statut": "AUTO (refus dossier)"
+    });
+
+    countSuccess++;
+  }
+
+  ui.alert("✅ Terminé", countSuccess + " email(s) de refus envoyé(s).\n" + countSkipped + " ligne(s) ignorée(s) (déjà traitée(s)).", ui.ButtonSet.OK);
+}
+
+/**
+ * Régénère la carte PDF pour les lignes sélectionnées, sans renvoyer d'email de refus/validation
+ * ni changer le statut du dossier. Utile après correction d'une info ou d'une photo.
+ */
+function regenerateSelectedCards() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var ui = SpreadsheetApp.getUi();
+
+  if (sheet.getName() !== CONFIG.SHEET_NAME) {
+    ui.alert("Sélectionnez d'abord des lignes dans l'onglet " + CONFIG.SHEET_NAME + ".");
+    return;
+  }
+
+  var range = sheet.getActiveRange();
+  var startRow = range.getRow();
+  var numRows = range.getNumRows();
+
+  if (startRow < 2) {
+    ui.alert("Veuillez sélectionner des lignes d'étudiants (à partir de la ligne 2).");
+    return;
+  }
+
+  var response = ui.alert('Régénération', 'Régénérer la carte PDF pour les ' + numRows + ' ligne(s) sélectionnée(s) ?', ui.ButtonSet.YES_NO);
+  if (response !== ui.Button.YES) return;
+
+  var countSuccess = 0, countError = 0;
+
+  for (var i = 0; i < numRows; i++) {
+    var currentRow = startRow + i;
+    var row = getRowAsObject(currentRow);
+    if (!row.ID) continue;
+
+    try {
+      var pdfFile = generateStudentCard(row);
+      setRowValues(currentRow, { "Lien_carte_PDF": pdfFile.getUrl() });
+      countSuccess++;
+    } catch (e) {
+      ui.alert("Erreur ligne " + currentRow + " : " + e.message);
+      countError++;
+    }
+  }
+
+  ui.alert("✅ Terminé", countSuccess + " carte(s) régénérée(s).\n" + countError + " erreur(s).", ui.ButtonSet.OK);
+}
+
+function activateSelectedRows() {
+  setStatusForSelectedRows_("ACTIF");
+}
+
+function deactivateSelectedRows() {
+  setStatusForSelectedRows_("INACTIF");
+}
+
+/**
+ * Applique le statut ACTIF/INACTIF à toutes les lignes sélectionnées.
+ */
+function setStatusForSelectedRows_(newStatus) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var ui = SpreadsheetApp.getUi();
+
+  if (sheet.getName() !== CONFIG.SHEET_NAME) {
+    ui.alert("Sélectionnez d'abord des lignes dans l'onglet " + CONFIG.SHEET_NAME + ".");
+    return;
+  }
+
+  var range = sheet.getActiveRange();
+  var startRow = range.getRow();
+  var numRows = range.getNumRows();
+
+  if (startRow < 2) {
+    ui.alert("Veuillez sélectionner des lignes d'étudiants (à partir de la ligne 2).");
+    return;
+  }
+
+  var response = ui.alert(
+    newStatus === "ACTIF" ? "Activation" : "Désactivation",
+    "Confirmer le passage à " + newStatus + " pour les " + numRows + " ligne(s) sélectionnée(s) ?",
+    ui.ButtonSet.YES_NO
+  );
+  if (response !== ui.Button.YES) return;
+
+  var colStatutCarte = getColIndex("Statut_carte");
+  var count = 0;
+
+  for (var i = 0; i < numRows; i++) {
+    var currentRow = startRow + i;
+    var idCell = sheet.getRange(currentRow, getColIndex("ID")).getValue();
+    if (!idCell) continue;
+
+    sheet.getRange(currentRow, colStatutCarte).setValue(newStatus);
+    setRowValues(currentRow, {
+      "Date_dernier_changement_statut": new Date(),
+      "Source_changement_statut": "MANUEL (menu admin)"
+    });
+    count++;
+  }
+
+  ui.alert("Terminé", count + " ligne(s) mise(s) à jour.", ui.ButtonSet.OK);
+}
+
+// ==========================================
+// GÉNÉRATION DE CARTE (multi-écoles)
+// ==========================================
+
+function generateStudentCard(row) {
+  var ecoleInfo = ECOLES[row.Ecole];
+  if (!ecoleInfo) {
+    throw new Error("Configuration manquante pour l'école : " + row.Ecole);
+  }
+
+  var templateFile = DriveApp.getFileById(ecoleInfo.templateSlideId);
+  var cardsFolder = DriveApp.getFolderById(CONFIG.CARDS_FOLDER_ID);
+
+  var newSlideFile = templateFile.makeCopy("CARTE_" + row.Nom + "_" + row.Matricule, cardsFolder);
+  var presentation = SlidesApp.openById(newSlideFile.getId());
+  var slide = presentation.getSlides()[0];
+
+  slide.replaceAllText("{{NOM}}", row.Nom || "");
+  slide.replaceAllText("{{PRENOM}}", row.Prenom || "");
+  slide.replaceAllText("{{MATRICULE}}", row.Matricule || "");
+  slide.replaceAllText("{{DATE_NAISSANCE}}", formatDateFr_(row.Date_naissance));
+  slide.replaceAllText("{{FORMATION}}", row.Formation || "");
+  slide.replaceAllText("{{ANNEE}}", row.Annee || "");
+
+  try {
+    var photoId = extractDriveId(row.Lien_photo);
+    var photoBlob = DriveApp.getFileById(photoId).getBlob();
+    replaceTextWithImageObj_(slide, "{{PHOTO}}", photoBlob);
+  } catch (e) {
+    Logger.log("Erreur insertion photo (" + row.Matricule + "): " + e.message);
+  }
+
+  try {
+    var scanUrl = CONFIG.WEB_APP_URL + "?id=" + encodeURIComponent(row.ID);
+    var qrUrl = "https://quickchart.io/qr?size=300&text=" + encodeURIComponent(scanUrl);
+    var qrBlob = UrlFetchApp.fetch(qrUrl).getBlob();
+    replaceTextWithImageObj_(slide, "{{QR}}", qrBlob);
+  } catch (e) {
+    Logger.log("Erreur génération QR (" + row.Matricule + "): " + e.message);
+  }
+
+  presentation.saveAndClose();
+
+  var pdfBlob = newSlideFile.getAs(MimeType.PDF);
+  var pdfFile = cardsFolder.createFile(pdfBlob);
+  newSlideFile.setTrashed(true);
+
+  return pdfFile;
+}
+
+/**
+ * Cherche la forme contenant "tag" dans le slide, insère l'image à la même position/taille,
+ * puis supprime la forme texte. S'arrête à la première correspondance.
+ */
+function replaceTextWithImageObj_(slide, tag, imageBlob) {
+  var shapes = slide.getShapes();
+  for (var i = 0; i < shapes.length; i++) {
+    var shape = shapes[i];
+    var text = "";
+    try { text = shape.getText().asString(); } catch (e) { continue; }
+
+    if (text.indexOf(tag) !== -1) {
+      var left = shape.getLeft();
+      var top = shape.getTop();
+      var width = shape.getWidth();
+      var height = shape.getHeight();
+
+      slide.insertImage(imageBlob, left, top, width, height);
+      shape.remove();
+      break;
+    }
+  }
+}
+
+/**
+ * Le formulaire envoie la date de naissance au format yyyy-mm-dd (input type="date").
+ * On la reformate en dd/MM/yyyy pour l'affichage sur la carte.
+ */
+function formatDateFr_(dateString) {
+  if (!dateString) return "";
+  var parts = dateString.toString().split("-");
+  if (parts.length === 3) {
+    return parts[2] + "/" + parts[1] + "/" + parts[0];
+  }
+  return dateString;
+}
+
+// ==========================================
+// EMAILS
+// ==========================================
+
+function sendCardEmail(student, pdf) {
+  var subject = "Votre carte d'étudiant " + student.Ecole + " est disponible !";
+  var ecoleInfo = ECOLES[student.Ecole] || { couleur: "#111111" };
+
+  var htmlBody =
+    '<div style="font-family: Arial, sans-serif; color: #333333; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">' +
+      '<div style="background-color: ' + ecoleInfo.couleur + '; padding: 25px; text-align: center; color: #ffffff;">' +
+        '<h2 style="margin: 0; font-size: 24px; letter-spacing: 1px;">' + student.Ecole + '</h2>' +
+      '</div>' +
+      '<div style="padding: 30px; background-color: #ffffff;">' +
+        '<p style="font-size: 16px;">Bonjour <strong>' + student.Prenom + '</strong>,</p>' +
+        '<p style="font-size: 16px; line-height: 1.5;">Nous avons le plaisir de vous informer que votre dossier d\'inscription a été validé avec succès.</p>' +
+        '<p style="font-size: 16px; line-height: 1.5;">Vous trouverez en pièce jointe votre <strong>carte d\'étudiant officielle</strong> au format PDF.</p>' +
+        '<div style="background-color: #f8f9fa; border-left: 4px solid ' + ecoleInfo.couleur + '; padding: 15px; margin: 25px 0;">' +
+          '<p style="margin: 0; font-size: 14px; color: #555;">Conseil : téléchargez cette carte sur votre smartphone pour l\'avoir toujours à portée de main, ou imprimez-la si vous préférez le format papier.</p>' +
+        '</div>' +
+        '<p style="font-size: 16px;">Nous vous souhaitons une excellente année scolaire parmi nous !</p>' +
+        '<br>' +
+        '<p style="font-size: 16px; margin-bottom: 0;">Cordialement,</p>' +
+        '<p style="font-size: 16px; font-weight: bold; margin-top: 5px; color: ' + ecoleInfo.couleur + ';">Le Service Scolarité — ' + student.Ecole + '</p>' +
+      '</div>' +
+    '</div>';
+
+  MailApp.sendEmail({
+    to: student.Email,
+    subject: subject,
+    htmlBody: htmlBody,
+    attachments: [pdf.getAs(MimeType.PDF)]
+  });
+}
+
+function sendRejectionEmail(student) {
+  var subject = student.Ecole + " — Documents non conformes";
+  var ecoleInfo = ECOLES[student.Ecole] || { couleur: "#111111" };
+
+  var htmlBody =
+    '<div style="font-family: Arial, sans-serif; color: #333333; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden;">' +
+      '<div style="background-color: ' + ecoleInfo.couleur + '; padding: 25px; text-align: center; color: #ffffff;">' +
+        '<h2 style="margin: 0; font-size: 24px;">Action requise — ' + student.Ecole + '</h2>' +
+      '</div>' +
+      '<div style="padding: 30px; background-color: #ffffff;">' +
+        '<p style="font-size: 16px;">Bonjour <strong>' + student.Prenom + '</strong>,</p>' +
+        '<p style="font-size: 16px; line-height: 1.5;">Suite à l\'analyse de votre demande de carte étudiante, nous avons constaté que vos <strong>documents justificatifs ne sont pas conformes</strong> (flous, incorrects, invalides ou incomplets).</p>' +
+        '<p style="font-size: 16px; line-height: 1.5; color: #d32f2f;"><strong>Par conséquent, votre carte étudiante n\'a pas pu être générée.</strong></p>' +
+        '<p style="font-size: 16px; margin-top: 20px;">Veuillez vous rapprocher du service scolarité dans les plus brefs délais pour régulariser votre situation et soumettre de nouveaux documents (photo, preuve d\'inscription, justificatif de paiement).</p>' +
+        '<br>' +
+        '<p style="font-size: 16px; margin-bottom: 0;">Cordialement,</p>' +
+        '<p style="font-size: 16px; font-weight: bold; margin-top: 5px; color: ' + ecoleInfo.couleur + ';">Le Service Scolarité — ' + student.Ecole + '</p>' +
+      '</div>' +
+    '</div>';
+
+  MailApp.sendEmail({
+    to: student.Email,
+    subject: subject,
+    htmlBody: htmlBody
+  });
+}
+
+// ==========================================
+// WEBAPP
+// ==========================================
+
+function doPost(e) {
+  try {
+    var data = JSON.parse(e.postData.contents);
+    var result = handleStudentSubmission(data);
+    return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: error.toString() })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+/**
+ * Sans paramètre : sert le formulaire étudiant.
+ * Avec ?id=... : page de vérification scannée depuis le QR de la carte (uniquement par ID,
+ * jamais par matricule, car le matricule est souvent devinable).
+ */
+function doGet(e) {
+  if (e.parameter.id) {
+    return handleQrScan(e.parameter.id);
+  }
+  return serveFormulaire();
+}
+
+function serveFormulaire() {
+  var ecolesData = {};
+  for (var nomEcole in ECOLES) {
+    ecolesData[nomEcole] = { formations: ECOLES[nomEcole].formations };
+  }
+
+  var template = HtmlService.createTemplateFromFile('Formulaire');
+  template.ecolesData = ecolesData;
+  template.webAppUrl = CONFIG.WEB_APP_URL;
+
+  return template.evaluate()
+    .setTitle("Demande de carte étudiante")
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+function handleQrScan(id) {
+  var result = findRowById(id);
+
+  if (!result) {
+    return HtmlService.createHtmlOutput(
+      "<h1 style='color:#B01E2E; text-align:center; margin-top:50px; font-family:sans-serif;'>Carte introuvable.</h1>"
+    );
+  }
+
+  var row = result.data;
+  var statutPropre = (row.Statut_carte && row.Statut_carte.toString().trim().toUpperCase() === "ACTIF") ? "ACTIF" : "INACTIF";
+  var ecoleInfo = ECOLES[row.Ecole] || { couleur: "#333333" };
+
+  var student = {
+    nom: row.Nom,
+    prenom: row.Prenom,
+    matricule: row.Matricule,
+    formation: row.Formation,
+    ecole: row.Ecole,
+    statut: statutPropre,
+    couleur: ecoleInfo.couleur
+  };
+
+  var template = HtmlService.createTemplateFromFile('Verification');
+  template.student = student;
+
+  return template.evaluate()
+    .setTitle("Vérification Carte Étudiante")
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+// ==========================================
+// SOUMISSION FORMULAIRE
+// ==========================================
+
+function handleStudentSubmission(data) {
+  var champsObligatoires = ["nom", "prenom", "matricule", "email", "ecole", "formation", "photo", "preuve", "justificatif"];
+  for (var i = 0; i < champsObligatoires.length; i++) {
+    if (!data[champsObligatoires[i]]) {
+      throw new Error("Champ manquant : " + champsObligatoires[i]);
+    }
+  }
+
+  if (!ECOLES.hasOwnProperty(data.ecole)) {
+    throw new Error("École inconnue : " + data.ecole);
+  }
+
+  var existing = findRowByMatricule(data.matricule);
+
+  if (existing) {
+    var statutActuel = existing.data.Statut_dossier;
+    if (statutActuel === "REFUSÉ (NON CONFORME)") {
+      return updateExistingSubmission(existing.rowNumber, existing.data, data);
+    } else {
+      throw new Error("Un dossier existe déjà pour ce matricule (statut actuel : " + statutActuel + "). Contactez le service scolarité si besoin.");
+    }
+  }
+
+  return createNewSubmission(data);
+}
+
+function createNewSubmission(data) {
+  var mainDocsFolder = DriveApp.getFolderById(CONFIG.DOCS_FOLDER_ID);
+  var folderName = data.nom.toUpperCase() + "_" + data.prenom + "_" + data.matricule;
+  var studentFolder = mainDocsFolder.createFolder(folderName);
+
+  var photoUrl = saveFile(data.photo, "Photo_" + data.matricule, studentFolder);
+  var preuveUrl = saveFile(data.preuve, "Preuve_inscription_" + data.matricule, studentFolder);
+  var justificatifUrl = saveFile(data.justificatif, "Justificatif_paiement_" + data.matricule, studentFolder);
+
+  var uniqueId = Utilities.getUuid();
+
+  appendRowFromObject({
+    "ID": uniqueId,
+    "Date_inscription": new Date(),
+    "Ecole": data.ecole,
+    "Nom": data.nom.toUpperCase(),
+    "Prenom": data.prenom,
+    "Matricule": data.matricule,
+    "Email": data.email,
+    "Telephone": data.telephone || "",
+    "Date_naissance": data.dateNaissance || "",
+    "Formation": data.formation,
+    "Annee": data.annee || "",
+    "Lien_dossier_Drive": studentFolder.getUrl(),
+    "Lien_photo": photoUrl,
+    "Lien_preuve_inscription": preuveUrl,
+    "Lien_justificatif_paiement": justificatifUrl,
+    "Statut_dossier": "EN ATTENTE DE VERIFICATION",
+    "Email_envoye": "NON"
+  });
+
+  return { status: "success", message: "Dossier envoyé", id: uniqueId };
+}
+
+function updateExistingSubmission(rowNumber, existingData, newData) {
+  var studentFolder = DriveApp.getFolderById(extractDriveId(existingData.Lien_dossier_Drive));
+
+  var photoUrl = saveFile(newData.photo, "Photo_" + newData.matricule, studentFolder);
+  var preuveUrl = saveFile(newData.preuve, "Preuve_inscription_" + newData.matricule, studentFolder);
+  var justificatifUrl = saveFile(newData.justificatif, "Justificatif_paiement_" + newData.matricule, studentFolder);
+
+  setRowValues(rowNumber, {
+    "Ecole": newData.ecole,
+    "Nom": newData.nom.toUpperCase(),
+    "Prenom": newData.prenom,
+    "Email": newData.email,
+    "Telephone": newData.telephone || "",
+    "Date_naissance": newData.dateNaissance || "",
+    "Formation": newData.formation,
+    "Annee": newData.annee || "",
+    "Lien_photo": photoUrl,
+    "Lien_preuve_inscription": preuveUrl,
+    "Lien_justificatif_paiement": justificatifUrl,
+    "Statut_dossier": "EN ATTENTE DE VERIFICATION"
+  });
+
+  return { status: "success", message: "Dossier mis à jour suite à resoumission", id: existingData.ID };
+}
